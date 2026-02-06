@@ -1,106 +1,251 @@
+// server.js
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const mongoose = require("mongoose");
-const Contact = require("./models/Contact"); // Import the Contact model
+
+const Contact = require("./models/Contact");
 const Consultation = require("./models/Consultation");
 
 const app = express();
-const PORT = 5050;
+const PORT = process.env.PORT || 5050;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// ✅ MongoDB Connection
-mongoose
-  .connect("mongodb+srv://akhileshreddy811:FdXjNbsTpx2wxfBc@cluster0.j8bppou.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0", {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
+/* =========================
+   Middleware
+========================= */
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : "*",
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
   })
-  .then(() => console.log("✅ Connected to MongoDB"))
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+);
+app.use(express.json({ limit: "1mb" }));
 
-// Nodemailer Transporter
+/* =========================
+   MongoDB Connection
+========================= */
+async function connectDB() {
+  try {
+    if (!process.env.MONGODB_URI) {
+      throw new Error("MONGODB_URI missing in .env");
+    }
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log("✅ Connected to MongoDB");
+  } catch (err) {
+    console.error("❌ MongoDB connection error:", err);
+    process.exit(1);
+  }
+}
+connectDB();
+
+/* =========================
+   Nodemailer Transporter
+========================= */
+// ✅ Use Gmail App Password (recommended)
 const transporter = nodemailer.createTransport({
   service: "gmail",
   auth: {
-    user: "akhileshreddy027@gmail.com",
-    pass: "falz qjnf dgnb wjsy", // App password
+    user: process.env.MAIL_USER, // ex: clyraoverseas06@gmail.com
+    pass: process.env.MAIL_PASS, // Gmail App Password
   },
 });
 
-// ✅ Contact Form API with DB Save
-app.post("/api/contact", async (req, res) => {
-  const { name, email, phone, requirement } = req.body;
-
-  const mailOptions = {
-    from: "akhileshreddy027@gmail.com",
-    to: "akhileshreddy027@gmail.com",
-    subject: "New Enquiry from Contact Form",
-    html: `
-      <h3>New Contact Form Submission</h3>
-      <p><strong>Name:</strong> ${name}</p>
-      <p><strong>Email:</strong> ${email}</p>
-      <p><strong>Phone:</strong> ${phone}</p>
-      <p><strong>Requirement:</strong> ${requirement}</p>
-    `,
-  };
-
-  try {
-    // Save to MongoDB
-    const newContact = new Contact({ name, email, phone, requirement });
-    await newContact.save();
-
-    // Send email
-    await transporter.sendMail(mailOptions);
-
-    res.status(200).json({ message: "Email sent & data saved successfully" });
-  } catch (error) {
-    console.error("Error processing contact form:", error);
-    res.status(500).json({ message: "Something went wrong" });
+// ✅ Verify transporter on server start
+transporter.verify((error) => {
+  if (error) {
+    console.log("❌ Nodemailer transporter error:", error);
+  } else {
+    console.log("✅ Nodemailer transporter is ready");
   }
 });
 
-// POST API to save consultation requests
+/* =========================
+   Helpers
+========================= */
+const safe = (v) =>
+  String(v ?? "")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .trim();
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+}
+
+/* =========================
+   Health Check
+========================= */
+app.get("/api/health", (req, res) => {
+  res.json({ ok: true, message: "Server is running" });
+});
+
+/* =========================
+   Test Mail Route (Check Nodemailer)
+========================= */
+app.get("/api/test-mail", async (req, res) => {
+  try {
+    const info = await transporter.sendMail({
+      from: `"Clyra Overseas Website" <${process.env.MAIL_USER}>`,
+      to: process.env.MAIL_TO || process.env.MAIL_USER,
+      subject: "✅ Nodemailer Test",
+      text: "If you received this email, Nodemailer is working.",
+    });
+
+    res.json({ ok: true, messageId: info.messageId });
+  } catch (err) {
+    console.error("❌ Test mail failed:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
+
+/* =========================
+   Contact Form API (Save DB + Send Email)
+========================= */
+app.post("/api/contact", async (req, res) => {
+  const name = safe(req.body?.name);
+  const email = safe(req.body?.email);
+  const phone = safe(req.body?.phone);
+  const requirement = safe(req.body?.requirement);
+
+  // ✅ basic validation
+  if (!name || !email || !phone || !requirement) {
+    return res.status(400).json({ message: "All fields are required" });
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: "Invalid email address" });
+  }
+
+  try {
+    // ✅ Save to MongoDB first
+    const newContact = await Contact.create({ name, email, phone, requirement });
+
+    // ✅ Send email (use authenticated from + replyTo user)
+    await transporter.sendMail({
+      from: `"Clyra Overseas Website" <${process.env.MAIL_USER}>`,
+      replyTo: email,
+      to: process.env.MAIL_TO || process.env.MAIL_USER,
+      subject: "New Enquiry from Contact Form",
+      html: `
+        <div style="font-family:Arial,sans-serif;line-height:1.6">
+          <h3>New Contact Form Submission</h3>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Phone:</strong> ${phone}</p>
+          <p><strong>Requirement:</strong> ${requirement}</p>
+          <hr/>
+          <p style="color:#666;font-size:12px">Saved ID: ${newContact._id}</p>
+        </div>
+      `,
+    });
+
+    return res
+      .status(200)
+      .json({ message: "Email sent & data saved successfully" });
+  } catch (error) {
+    console.error("❌ Error processing contact form:", error);
+    return res.status(500).json({ message: "Something went wrong" });
+  }
+});
+
+/* =========================
+   Consultation API (Save DB)
+========================= */
+// ✅ Consultation API (Save DB + Send Email)
 app.post("/api/consultation", async (req, res) => {
-  const { name, email, phone, country, level } = req.body;
+  const name = safe(req.body?.name);
+  const email = safe(req.body?.email);
+  const phone = safe(req.body?.phone);
+  const country = safe(req.body?.country);
+  const level = safe(req.body?.level);
 
   if (!name || !email || !phone || !country || !level) {
     return res.status(400).json({ message: "All fields are required" });
   }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ message: "Invalid email address" });
+  }
 
   try {
-    const newConsultation = new Consultation({ name, email, phone, country, level });
-    await newConsultation.save();
+    // ✅ Save to DB
+    const doc = await Consultation.create({ name, email, phone, country, level });
 
-    res.status(200).json({ message: "Consultation request submitted successfully" });
+    // ✅ Send email to admin
+    await transporter.sendMail({
+      from: `"Clyra Overseas Website" <${process.env.MAIL_USER}>`,
+      replyTo: email,
+      to: process.env.MAIL_TO || process.env.MAIL_USER,
+      subject: "New Consultation Request",
+      html: `
+        <div style="font-family:Arial,sans-serif;line-height:1.6">
+          <h3>New Consultation Request</h3>
+          <p><strong>Name:</strong> ${name}</p>
+          <p><strong>Email:</strong> ${email}</p>
+          <p><strong>Phone:</strong> ${phone}</p>
+         
+          <hr/>
+        </div>
+      `,
+    });
+
+    return res.status(200).json({
+      message: "Consultation request submitted successfully",
+      consultation: doc,
+    });
   } catch (error) {
-    console.error("Error saving consultation data:", error);
-    res.status(500).json({ message: "Failed to submit consultation request" });
+    console.error("❌ Error saving consultation data:", error);
+    return res.status(500).json({
+      message: "Failed to submit consultation request",
+      error: error?.message || String(error),
+    });
   }
 });
-const ACCESS_CODE = "CLYRA2025";
 
-// Protected route to fetch both Contact and Consultation data
+/* =========================
+   Admin Protected Route (Access Code)
+   ✅ returns contacts + consultations data
+========================= */
 app.post("/api/admin-data", async (req, res) => {
-  const { code } = req.body;
+  const code = safe(req.body?.code);
 
-  if (code !== ACCESS_CODE) {
+  if (!process.env.ACCESS_CODE) {
+    return res.status(500).json({ message: "ACCESS_CODE missing in .env" });
+  }
+  if (code !== process.env.ACCESS_CODE) {
     return res.status(401).json({ message: "Invalid Access Code" });
   }
 
   try {
-    const contacts = await Contact.find().sort({ createdAt: -1 });
-    const consultations = await Consultation.find().sort({ createdAt: -1 });
+    // ✅ Get data
+    const contacts = await Contact.find().sort({ createdAt: -1 }).lean();
+    const consultations = await Consultation.find().sort({ createdAt: -1 }).lean();
 
-    res.json({ contacts, consultations });
+    // ✅ Optional: include counts
+    return res.json({
+      contactsCount: contacts.length,
+      consultationsCount: consultations.length,
+      contacts,
+      consultations,
+    });
   } catch (error) {
-    console.error("Error fetching admin data:", error);
-    res.status(500).json({ message: "Server Error" });
+    console.error("❌ Error fetching admin data:", error);
+    return res.status(500).json({ message: "Server Error" });
   }
 });
 
+
+/* =========================
+   Global Error Handler (Optional)
+========================= */
+app.use((err, req, res, next) => {
+  console.error("❌ Unhandled error:", err);
+  res.status(500).json({ message: "Internal Server Error" });
+});
+
+/* =========================
+   Start Server
+========================= */
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });

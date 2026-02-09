@@ -11,9 +11,6 @@ const Consultation = require("./models/Consultation");
 const app = express();
 const PORT = process.env.PORT || 5050;
 
-/* =========================
-   Middleware
-========================= */
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",") : "*",
